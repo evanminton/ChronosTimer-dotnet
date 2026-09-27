@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ChronosTimer.Core/ChronosTimer.Core.csproj" />
+    <Project Path="src/ChronosTimer.Audio/ChronosTimer.Audio.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/ChronosTimer.Cli/ChronosTimer.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ChronosTimer.Tests/ChronosTimer.Tests.csproj" />
+  </Folder>
+  <Folder Name="/apps/">
+    <Project Path="apps/ChronosTimer.App/ChronosTimer.App.csproj" />
+  </Folder>
+  <Folder Name="/lib/">
+    <Project Path="../LTC-dotnet/src/LinearTimecode/LinearTimecode.csproj" />
+  </Folder>
+</Solution>
