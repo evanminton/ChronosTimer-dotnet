@@ -122,7 +122,7 @@ public sealed class Setting
     public static double ParseNumber(string text, double min, double max)
     {
         string t = text.Trim().TrimEnd('%');
-        foreach (string unit in new[] { "dbfs", "db", "ms", "hz", "khz", "us", "µs", "x" })
+        foreach (string unit in new[] { "dbfs", "db", "ms", "khz", "hz", "us", "µs", "x" })
             if (t.EndsWith(unit, StringComparison.OrdinalIgnoreCase)) { t = t[..^unit.Length].Trim(); break; }
         if (!double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
             throw new FormatException($"'{text}' is not a number.");

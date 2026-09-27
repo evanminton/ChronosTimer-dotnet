@@ -134,7 +134,14 @@ public sealed class TimerEngine
     public TimerMode Mode
     {
         get { lock (_gate) return _mode; }
-        set => Mutate($"mode {value}", _ => { _mode = value; _ended = false; });
+        set => Mutate($"mode {value}", now =>
+        {
+            // Entering time of day while paused holds the time of day at the switch.
+            if (value == TimerMode.TimeOfDay && _mode != TimerMode.TimeOfDay && _state == TransportState.Paused)
+                _pausedTodFrames = WallTimeOfDay(now, includeOffset: true).TotalSeconds * TodFramesPerSecond(_rate);
+            _mode = value;
+            _ended = false;
+        });
     }
 
     public LtcFrameRate Rate
@@ -548,9 +555,9 @@ public sealed class TimerEngine
 
     private bool AtEnd(double now)
     {
-        if (LengthSeconds() is not { } len) return false;
+        if (_endAction == EndAction.Continue || LengthSeconds() is not { } len) return false;
         double el = ElapsedAt(now);
-        return _reverse ? el <= 0 : el >= len && _endAction != EndAction.Continue;
+        return _reverse ? el <= 0 : el >= len;
     }
 
     /// <summary>Applies the end action if the count has passed its end. Returns the action applied, if any.</summary>

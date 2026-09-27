@@ -87,7 +87,7 @@ function connect(){try{ws=new WebSocket((location.protocol==='https:'?'wss://':'
 ws.onopen=()=>{$('#conn').textContent='live';$('#conn').className='chip on';stopPoll()};
 ws.onmessage=e=>{const j=JSON.parse(e.data);if('ok' in j){log(j.message,j.ok);refreshSettingsSoon()}else show(j)};
 ws.onclose=()=>{$('#conn').textContent='reconnecting';$('#conn').className='chip';ws=null;startPoll();setTimeout(connect,2000)}}
-function startPoll(){if(poll)return;poll=setInterval(async()=>{try{show(await (await fetch('api/status')).json())}catch(e){}},300)}
+function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const r=await fetch('api/status');if(r.status===401){location.href='/';return}show(await r.json())}catch(e){}},300)}
 function stopPoll(){clearInterval(poll);poll=null}
 document.querySelectorAll('button[data-c]').forEach(b=>b.onclick=()=>send(b.dataset.c));
 $('#locf').onsubmit=e=>{e.preventDefault();const v=$('#loc').value.trim();if(v)send('locate '+v)};

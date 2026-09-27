@@ -98,7 +98,7 @@ public sealed class LtcOutput
         else DetachClock();
 
         double baseTime = _ac is not null && ReferenceEquals(_engine.Clock, _ac)
-            ? _ac.HeardTime(_rendered, LatencySamples)
+            ? _ac.HeardTime(_rendered)
             : _engine.Now + (double)LatencySamples / SampleRate;
         baseTime += OffsetSeconds;
 

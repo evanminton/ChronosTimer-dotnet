@@ -82,7 +82,7 @@ public sealed class LtcInput
 
     private void OnFrame(LtcDecodedFrame f)
     {
-        double time = _bufferEndTime - (_bufferStart + _bufferLen - f.StartSample) / SampleRate;
+        double time = _bufferEndTime - (_bufferStart + _bufferLen - f.StartSample) / (double)SampleRate;
         var tc = f.Timecode;
         if (FollowRate && _engine.Mode == TimerMode.Chase)
         {
