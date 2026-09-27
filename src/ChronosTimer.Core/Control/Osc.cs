@@ -89,13 +89,14 @@ public static class Osc
         string first = ReadString(p, ref pos);
         if (first == "#bundle")
         {
+            Need(p, pos, 8);
             pos += 8; // time tag
             while (pos < p.Length)
             {
                 if (pos + 4 > p.Length) throw new FormatException("Truncated OSC bundle.");
                 int size = BinaryPrimitives.ReadInt32BigEndian(p[pos..]);
                 pos += 4;
-                if (size < 0 || pos + size > p.Length) throw new FormatException("Bad OSC bundle element size.");
+                if (size < 0 || (long)pos + size > p.Length) throw new FormatException("Bad OSC bundle element size.");
                 DecodeInto(p.Slice(pos, size), list, depth + 1);
                 pos += size;
             }
@@ -129,7 +130,7 @@ public static class Osc
                             int n = BinaryPrimitives.ReadInt32BigEndian(p[pos..]); pos += 4;
                             Need(p, pos, n);
                             args.Add(p.Slice(pos, n).ToArray());
-                            pos += (n + 3) & ~3;
+                            pos += (int)Math.Min(((long)n + 3) & ~3L, p.Length - pos);
                             break;
                         }
                     case '[' or ']': break;
@@ -142,11 +143,12 @@ public static class Osc
 
     private static void Need(ReadOnlySpan<byte> p, int pos, int n)
     {
-        if (n < 0 || pos + n > p.Length) throw new FormatException("Truncated OSC message.");
+        if (n < 0 || pos < 0 || (long)pos + n > p.Length) throw new FormatException("Truncated OSC message.");
     }
 
     private static string ReadString(ReadOnlySpan<byte> p, ref int pos)
     {
+        if (pos < 0 || pos >= p.Length) throw new FormatException("Truncated OSC message.");
         int end = p[pos..].IndexOf((byte)0);
         if (end < 0) throw new FormatException("Unterminated OSC string.");
         string s = Encoding.UTF8.GetString(p.Slice(pos, end));

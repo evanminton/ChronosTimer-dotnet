@@ -90,7 +90,11 @@ public static class Json
     public static Dictionary<string, string> ReadFlat(string json)
     {
         var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }); }
+        catch (JsonException ex) { throw new FormatException("Not valid JSON: " + ex.Message, ex); }
+        using var _ = doc;
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new FormatException("Expected a JSON object.");
         foreach (var p in doc.RootElement.EnumerateObject())
             d[p.Name] = p.Value.ValueKind switch
             {

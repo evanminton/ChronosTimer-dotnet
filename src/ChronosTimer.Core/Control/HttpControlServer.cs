@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -22,7 +21,10 @@ namespace ChronosTimer.Control;
 /// GET  /api/&lt;command&gt;/&lt;args…&gt;          e.g. /api/play, /api/locate/01:00:00:00, /api/duration/5m
 /// GET  /ws                       WebSocket: status JSON pushed at status-rate; send command lines as text
 /// </code>
-/// Responses carry <c>Access-Control-Allow-Origin: *</c> so other web pages (e.g. a show-control dashboard) can call the API.
+/// When a token is set, every request except the sign-in page needs it: <c>?token=…</c>, an <c>X-Chronos-Token</c> or
+/// <c>Authorization: Bearer …</c> header, or the <c>SameSite=Strict</c> cookie the remote page gets after
+/// <c>/?token=…</c>. Browser requests from other origins are refused unless the origin is listed in the allowed origins
+/// (e.g. a show-control dashboard), and even then they need the token.
 /// </remarks>
 public sealed class HttpControlServer : IDisposable
 {
@@ -30,43 +32,51 @@ public sealed class HttpControlServer : IDisposable
     private readonly TimerHost _host;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _cts = new();
-    private readonly bool _localOnly;
+    private const string CookieName = "chronos_token";
+    private readonly IPAddress _bind;
+    private readonly byte[] _token;
+    private readonly string _tokenText;
+    private readonly HashSet<string> _origins;
     private int _clients;
 
-    public HttpControlServer(TimerHost host, int port, bool localOnly = false)
+    /// <param name="host">Timer to control.</param>
+    /// <param name="bind">Address to listen on (<see cref="IPAddress.Loopback"/>, <see cref="IPAddress.Any"/> or one interface's address).</param>
+    /// <param name="port">TCP port (0 = any free port).</param>
+    /// <param name="token">Access token every request must carry; empty = no authentication.</param>
+    /// <param name="allowedOrigins">Other web origins (e.g. <c>http://dashboard:3000</c>, or <c>*</c>) whose pages may call the API.</param>
+    public HttpControlServer(TimerHost host, IPAddress bind, int port, string token = "", IEnumerable<string>? allowedOrigins = null)
     {
         _host = host;
-        _localOnly = localOnly;
-        _listener = new TcpListener(localOnly ? IPAddress.Loopback : IPAddress.Any, port);
+        _bind = bind;
+        _tokenText = token ?? "";
+        _token = Encoding.UTF8.GetBytes(_tokenText);
+        _origins = new HashSet<string>((allowedOrigins ?? []).Select(o => o.Trim().TrimEnd('/')).Where(o => o.Length > 0), StringComparer.OrdinalIgnoreCase);
+        _listener = new TcpListener(bind, port);
         _listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
     }
 
     public int Port { get; private set; }
 
+    /// <summary>Address the server listens on.</summary>
+    public IPAddress BindAddress => _bind;
+
     /// <summary>WebSocket clients connected.</summary>
     public int WebSocketClients => _clients;
 
-    /// <summary>Addresses the remote can be opened at.</summary>
+    /// <summary>Addresses the remote can be opened at (with the token, so they work as links).</summary>
     public IReadOnlyList<string> Urls
     {
         get
         {
+            string q = _tokenText.Length > 0 ? "?token=" + Uri.EscapeDataString(_tokenText) : "";
             var list = new List<string>();
-            if (!_localOnly)
+            foreach (var a in NetworkBinding.Reachable(_bind))
             {
-                try
-                {
-                    foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-                    {
-                        if (ni.OperationalStatus != OperationalStatus.Up || ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                        foreach (var ua in ni.GetIPProperties().UnicastAddresses)
-                            if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
-                                list.Add($"http://{ua.Address}:{Port}/");
-                    }
-                }
-                catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException or NotImplementedException) { }
+                if (IPAddress.IsLoopback(a)) continue;
+                string h = a.AddressFamily == AddressFamily.InterNetworkV6 ? $"[{a}]" : a.ToString();
+                list.Add($"http://{h}:{Port}/{q}");
             }
-            list.Add($"http://localhost:{Port}/");
+            if (_bind.Equals(IPAddress.Any) || IPAddress.IsLoopback(_bind)) list.Add($"http://localhost:{Port}/{q}");
             return list;
         }
     }
@@ -107,13 +117,25 @@ public sealed class HttpControlServer : IDisposable
                 var req = await ReadRequest(stream, remote, timeout.Token).ConfigureAwait(false);
                 if (req is null) return;
 
+                string cors = CorsHeaders(req);
+                if (!OriginAllowed(req))
+                {
+                    await WriteResponse(stream, 403, TextType, "Requests from other web pages are not allowed (see http-origins).", "", _cts.Token).ConfigureAwait(false);
+                    return;
+                }
+                if (req.Method == "OPTIONS")
+                {
+                    await WriteResponse(stream, 204, TextType, "", cors, _cts.Token).ConfigureAwait(false);
+                    return;
+                }
                 if (req.Path == "/ws" && req.Headers.TryGetValue("upgrade", out string? up) && up.Equals("websocket", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (!Authorized(req)) { await WriteResponse(stream, 401, TextType, "Access token required.", cors, _cts.Token).ConfigureAwait(false); return; }
                     await WebSocketSession(stream, req).ConfigureAwait(false);
                     return;
                 }
-                var (status, type, body) = Route(req);
-                await WriteResponse(stream, status, type, body, _cts.Token).ConfigureAwait(false);
+                var (status, type, body, extra) = Route(req);
+                await WriteResponse(stream, status, type, body, extra + cors, _cts.Token).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
         }
@@ -166,15 +188,78 @@ public sealed class HttpControlServer : IDisposable
         return new Request(first[0].ToUpperInvariant(), path, qd, headers, body, remote);
     }
 
-    private (int Status, string Type, string Body) Route(Request r)
-    {
-        const string JsonType = "application/json; charset=utf-8", TextType = "text/plain; charset=utf-8";
-        if (r.Method == "OPTIONS") return (204, TextType, "");
-        string p = r.Path.TrimEnd('/');
-        if (p is "" or "/index.html" or "/remote") return (200, "text/html; charset=utf-8", WebRemotePage.Html);
-        if (p == "/favicon.ico") return (204, TextType, "");
-        if (!p.StartsWith("/api", StringComparison.OrdinalIgnoreCase)) return (404, TextType, "Not found. Try / (remote) or /api/status.");
+    private const string JsonType = "application/json; charset=utf-8", TextType = "text/plain; charset=utf-8", HtmlType = "text/html; charset=utf-8";
 
+    // ───────────────────────────── access control ─────────────────────────────
+
+    /// <summary>True when the request carries the token (or no token is set).</summary>
+    private bool Authorized(Request r)
+    {
+        if (_token.Length == 0) return true;
+        string? given = r.Query.GetValueOrDefault("token")
+            ?? r.Headers.GetValueOrDefault("x-chronos-token")
+            ?? (r.Headers.TryGetValue("authorization", out string? a) && a.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? a[7..].Trim() : null)
+            ?? Cookie(r, CookieName);
+        return given is not null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(given), _token);
+    }
+
+    private static string? Cookie(Request r, string name)
+    {
+        if (!r.Headers.TryGetValue("cookie", out string? header)) return null;
+        foreach (string part in header.Split(';'))
+        {
+            int eq = part.IndexOf('=');
+            if (eq > 0 && part[..eq].Trim() == name) return Uri.UnescapeDataString(part[(eq + 1)..].Trim());
+        }
+        return null;
+    }
+
+    /// <summary>Browsers send Origin on cross-origin (and most same-origin) requests; non-browser clients usually don't.</summary>
+    private static bool SameOrigin(Request r, out string? origin)
+    {
+        if (!r.Headers.TryGetValue("origin", out origin) || origin.Length == 0) { origin = null; return true; }
+        return Uri.TryCreate(origin, UriKind.Absolute, out var u) && r.Headers.TryGetValue("host", out string? host)
+            && u.Authority.Equals(host, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool OriginAllowed(Request r) =>
+        SameOrigin(r, out string? o) || _origins.Contains("*") || _origins.Contains(o!.TrimEnd('/'));
+
+    private string CorsHeaders(Request r)
+    {
+        if (SameOrigin(r, out string? o) || !OriginAllowed(r)) return "";
+        return $"Access-Control-Allow-Origin: {o}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
+               "Access-Control-Allow-Headers: Content-Type, Authorization, X-Chronos-Token\r\n";
+    }
+
+    private static string SignInPage(bool wrong) => $$"""
+        <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chronos Timer</title>
+        <style>body{font:16px system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0}form{display:grid;gap:10px;padding:16px;max-width:320px}input,button{font:inherit;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#eee}</style></head>
+        <body><form method="get" action="/"><h1>Chronos Timer</h1><p>Enter the access token shown by the timer (setting <b>http-token</b>), or open the link it shows.</p>
+        {{(wrong ? "<p style=\"color:#f66\">Wrong token.</p>" : "")}}<input name="token" autocomplete="current-password" autofocus><button>Open remote</button></form></body></html>
+        """;
+
+    private (int Status, string Type, string Body, string Headers) Route(Request r)
+    {
+        string p = r.Path.TrimEnd('/');
+        if (p == "/favicon.ico") return (204, TextType, "", "");
+        bool ok = Authorized(r);
+        if (p is "" or "/index.html" or "/remote")
+        {
+            if (!ok) return (401, HtmlType, SignInPage(r.Query.ContainsKey("token")), "");
+            // Signed in with ?token=: keep it in a same-site cookie and drop it from the address bar.
+            if (_token.Length > 0 && r.Query.ContainsKey("token"))
+                return (303, TextType, "", $"Set-Cookie: {CookieName}={Uri.EscapeDataString(_tokenText)}; Path=/; HttpOnly; SameSite=Strict\r\nLocation: {(p.Length == 0 ? "/" : p)}\r\n");
+            return (200, HtmlType, WebRemotePage.Html, "");
+        }
+        if (!p.StartsWith("/api", StringComparison.OrdinalIgnoreCase)) return (404, TextType, "Not found. Try / (remote) or /api/status.", "");
+        if (!ok) return (401, JsonType, Json.Result(CommandResult.Error("Access token required (http-token).")), "WWW-Authenticate: Bearer\r\n");
+        var (status, type, body) = Api(r, p);
+        return (status, type, body, "");
+    }
+
+    private (int Status, string Type, string Body) Api(Request r, string p)
+    {
         string sub = p.Length > 4 ? p[5..] : "";
         switch (sub.ToLowerInvariant())
         {
@@ -212,12 +297,12 @@ public sealed class HttpControlServer : IDisposable
         }
     }
 
-    private static async Task WriteResponse(NetworkStream s, int status, string type, string body, CancellationToken ct)
+    private static async Task WriteResponse(NetworkStream s, int status, string type, string body, string extraHeaders, CancellationToken ct)
     {
-        string reason = status switch { 200 => "OK", 204 => "No Content", 400 => "Bad Request", 404 => "Not Found", _ => "Error" };
+        string reason = status switch { 200 => "OK", 204 => "No Content", 303 => "See Other", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found", _ => "Error" };
         byte[] b = Encoding.UTF8.GetBytes(body);
         string head = $"HTTP/1.1 {status} {reason}\r\nContent-Type: {type}\r\nContent-Length: {b.Length}\r\nCache-Control: no-store\r\n" +
-                      "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+                      extraHeaders + "Connection: close\r\n\r\n";
         await s.WriteAsync(Encoding.ASCII.GetBytes(head), ct).ConfigureAwait(false);
         if (b.Length > 0) await s.WriteAsync(b, ct).ConfigureAwait(false);
         await s.FlushAsync(ct).ConfigureAwait(false);
