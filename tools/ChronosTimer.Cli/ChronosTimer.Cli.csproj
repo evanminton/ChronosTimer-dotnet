@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>chronos-timer</AssemblyName>
+    <RootNamespace>ChronosTimer.Cli</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Description>chronos-timer — portable, remote-controllable timecode / countdown / time-of-day / chase timer with LTC audio output and input.</Description>
+    <!-- Portable single-file publishing (see publish.ps1): self-contained, one exe, no install. -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ChronosTimer.Core\ChronosTimer.Core.csproj" />
+    <ProjectReference Include="..\..\src\ChronosTimer.Audio\ChronosTimer.Audio.csproj" />
+  </ItemGroup>
+
+</Project>

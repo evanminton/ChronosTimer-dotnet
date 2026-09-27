@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>ChronosTimer</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <Description>Chronos Timer engine: a controllable timecode / count-up / countdown / time-of-day / chase timer with LTC audio output and input, HTTP + WebSocket, OSC and text-command control. Platform-neutral; audio devices plug in through IAudioBackend.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(LtcProject)" />
+    <InternalsVisibleTo Include="ChronosTimer.Tests" />
+  </ItemGroup>
+
+</Project>
