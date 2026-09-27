@@ -52,7 +52,7 @@ public class CommandTests
     public void Every_setting_is_described_and_round_trips()
     {
         using var h = Host();
-        var skip = new HashSet<string> { "http", "http-port", "http-local-only", "osc", "osc-port", "output", "input", "output-device", "input-device" };
+        var skip = new HashSet<string> { "http", "http-port", "http-bind", "http-token", "http-origins", "osc", "osc-port", "osc-bind", "output", "input", "output-device", "input-device" };
         foreach (var s in h.Settings)
         {
             Assert.False(string.IsNullOrWhiteSpace(s.Description), s.Name);
@@ -92,6 +92,72 @@ public class CommandTests
         }
         finally { File.Delete(path); }
     }
+
+    [Fact]
+    public void Load_of_a_bad_file_is_an_error_not_a_crash()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"chronos-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, "this is not json");
+            using var h = Host();
+            h.Apply([new("http", "off"), new("osc", "off")]);
+            var r = h.Execute("load " + path);
+            Assert.False(r.Ok);
+            File.WriteAllText(path, "[1, 2]");
+            Assert.False(h.Execute("load " + path).Ok);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Remotes_cannot_save_or_load_other_files()
+    {
+        using var h = Host();
+        h.Apply([new("http", "off"), new("osc", "off")]);
+        string path = Path.Combine(Path.GetTempPath(), $"chronos-{Guid.NewGuid():N}.json");
+        var r = h.Execute("save " + path, "http 10.0.0.9");
+        Assert.False(r.Ok);
+        Assert.False(File.Exists(path));
+        Assert.False(h.Execute("load " + path, "osc 10.0.0.9").Ok);
+    }
+
+    [Fact]
+    public void Bad_osc_feedback_host_is_an_error()
+    {
+        using var h = Host();
+        h.Apply([new("http", "off"), new("osc", "off")]);
+        Assert.False(h.Execute("set osc-feedback no-such-host.invalid:9001").Ok);
+        Assert.False(h.Execute("set osc-feedback nonsense").Ok);
+        Assert.Equal("", h.FindSetting("osc-feedback")!.Value);
+    }
+
+    [Fact]
+    public void Bind_and_token_settings()
+    {
+        using var h = Host();
+        h.Apply([new("http", "off"), new("osc", "off")]);
+        Assert.Equal("localhost", h.FindSetting("http-bind")!.Value);
+        Assert.Equal("localhost", h.FindSetting("osc-bind")!.Value);
+        Assert.Contains(h.FindSetting("http-bind")!.Options, o => o.Value == "all");
+        Assert.True(h.Execute("set http-bind 0.0.0.0").Ok);
+        Assert.Equal("all", h.FindSetting("http-bind")!.Value);
+        Assert.False(h.Execute("set http-bind no-such-interface-xyz").Ok);
+        Assert.True(h.FindSetting("http-token")!.Value.Length >= 16);
+        Assert.False(h.Execute("set http-token short").Ok);
+        Assert.False(h.Execute("set http-token \"has;semicolon\"").Ok);
+        Assert.True(h.Execute("set http-token off").Ok);
+        Assert.Equal("", h.FindSetting("http-token")!.Value);
+        Assert.Empty(h.Apply([new("http-local-only", "on")])); // old settings files still load
+    }
+
+    [Theory]
+    [InlineData("48kHz", 48_000)]
+    [InlineData("44.1khz", 44_100)]
+    [InlineData("48000hz", 48_000)]
+    [InlineData("-12dBFS", -12)]
+    public void Numbers_with_units(string text, double value) =>
+        Assert.Equal(value, Setting.ParseNumber(text, -100_000, 200_000), 6);
 }
 
 public class OscTests
@@ -106,6 +172,27 @@ public class OscTests
         var bundle = Osc.EncodeBundle([new OscMessage("/a", [1]), new OscMessage("/b", ["x"])]);
         Assert.Equal(2, Osc.Decode(bundle).Count);
     }
+
+    public static TheoryData<byte[]> Malformed => new()
+    {
+        // second string argument runs past the end
+        Concat(Osc.Encode("/a", "x", "y").AsSpan(0, 10).ToArray()),
+        // blob size near int.MaxValue
+        Concat(Osc.Encode("/a", new byte[] { 1 }).AsSpan(0, 8).ToArray(), [0x7F, 0xFF, 0xFF, 0xFE]),
+        // bundle element size near int.MaxValue
+        Concat(Osc.EncodeBundle([]), [0x7F, 0xFF, 0xFF, 0xF0, 0, 0, 0, 0]),
+        // bundle without a time tag
+        Concat("#bundle\0"u8.ToArray()),
+        // type tags without room for the int
+        Concat("/a\0\0,i\0\0"u8.ToArray()),
+    };
+
+    private static byte[] Concat(params byte[][] parts) => [.. parts.SelectMany(p => p)];
+
+    [Theory]
+    [MemberData(nameof(Malformed))]
+    public void Malformed_packets_throw_format_exception(byte[] packet) =>
+        Assert.Throws<FormatException>(() => Osc.Decode(packet));
 
     [Fact]
     public void Maps_to_commands()
@@ -161,11 +248,29 @@ public class HttpTests
     {
         int port = FreeTcpPort();
         using var h = new TimerHost();
-        h.Apply([new("osc", "off"), new("http-port", port.ToString()), new("http-local-only", "on")]);
+        h.Apply([new("osc", "off"), new("http-port", port.ToString()), new("http-bind", "localhost"), new("http-token", "test-token-123")]);
         h.Set("http", "on");
         Assert.NotNull(h.Http);
-        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(5) };
+        Assert.All(h.Http.Urls, u => Assert.EndsWith("?token=test-token-123", u));
+        using var anon = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/"), Timeout = TimeSpan.FromSeconds(5) };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anon.GetAsync("/api/status")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anon.GetAsync("/api/save/x.json?token=wrong")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anon.GetAsync("/")).StatusCode); // sign-in page
 
+        // a page on another site can't use the API, even with the token
+        var cross = new HttpRequestMessage(HttpMethod.Get, "/api/status");
+        cross.Headers.Add("Origin", "http://evil.example");
+        cross.Headers.Add("X-Chronos-Token", "test-token-123");
+        Assert.Equal(HttpStatusCode.Forbidden, (await anon.SendAsync(cross)).StatusCode);
+
+        // signing in with ?token= sets a same-site cookie and redirects
+        using var browser = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { BaseAddress = anon.BaseAddress };
+        var signIn = await browser.GetAsync("/?token=test-token-123");
+        Assert.Equal(HttpStatusCode.SeeOther, signIn.StatusCode);
+        Assert.Contains(signIn.Headers.GetValues("Set-Cookie"), c => c.Contains("SameSite=Strict"));
+
+        using var http = new HttpClient { BaseAddress = anon.BaseAddress, Timeout = TimeSpan.FromSeconds(5) };
+        http.DefaultRequestHeaders.Add("X-Chronos-Token", "test-token-123");
         string page = await http.GetStringAsync("/");
         Assert.Contains("Chronos Timer", page);
 
@@ -186,6 +291,7 @@ public class HttpTests
         Assert.Contains("\"end-action\"", settings);
 
         using var ws = new ClientWebSocket();
+        ws.Options.SetRequestHeader("X-Chronos-Token", "test-token-123");
         using var cts = new CancellationTokenSource(5000);
         await ws.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/ws"), cts.Token);
         var buf = new byte[65536];

@@ -22,16 +22,24 @@ public sealed class OscControlServer : IDisposable
     private DateTime _lastFull;
     private Task? _rx, _tx;
 
-    public OscControlServer(TimerHost host, int port)
+    /// <param name="host">Timer to control.</param>
+    /// <param name="port">UDP port (0 = any free port).</param>
+    /// <param name="bind">Address to listen on (default <see cref="IPAddress.Any"/>).</param>
+    public OscControlServer(TimerHost host, int port, IPAddress? bind = null)
     {
         _host = host;
-        _udp = new UdpClient(AddressFamily.InterNetwork);
+        bind ??= IPAddress.Any;
+        _udp = new UdpClient(bind.AddressFamily);
         _udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        _udp.Client.Bind(new IPEndPoint(IPAddress.Any, port));
+        _udp.Client.Bind(new IPEndPoint(bind, port));
         Port = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
+        BindAddress = bind;
     }
 
     public int Port { get; }
+
+    /// <summary>Address the server listens on.</summary>
+    public IPAddress BindAddress { get; }
 
     public void Start()
     {
@@ -39,8 +47,15 @@ public sealed class OscControlServer : IDisposable
         _tx = Task.Run(FeedbackLoop);
     }
 
-    /// <summary>Sets feedback targets from "host:port, host:port".</summary>
+    /// <summary>Sets feedback targets from "host:port, host:port". Throws <see cref="FormatException"/> for a bad or unresolvable target.</summary>
     public void SetFeedbackTargets(string text)
+    {
+        var list = ParseTargets(text);
+        lock (_targetsGate) { _targets = list; _lastSent.Clear(); }
+    }
+
+    /// <summary>Parses and resolves "host:port, host:port". Throws <see cref="FormatException"/> for a bad or unresolvable target.</summary>
+    public static List<IPEndPoint> ParseTargets(string text)
     {
         var list = new List<IPEndPoint>();
         foreach (string part in (text ?? "").Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries))
@@ -49,12 +64,17 @@ public sealed class OscControlServer : IDisposable
             if (colon <= 0 || !int.TryParse(part[(colon + 1)..], out int port) || port is < 1 or > 65535)
                 throw new FormatException($"'{part}' is not host:port.");
             string h = part[..colon].Trim('[', ']');
-            IPAddress? ip = IPAddress.TryParse(h, out var parsed) ? parsed
-                : Dns.GetHostAddresses(h).FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+            IPAddress? ip;
+            if (IPAddress.TryParse(h, out var parsed)) ip = parsed;
+            else
+            {
+                try { ip = Dns.GetHostAddresses(h).FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork); }
+                catch (Exception ex) when (ex is SocketException or ArgumentException) { throw new FormatException($"Can't resolve '{h}': {ex.Message}", ex); }
+            }
             if (ip is null) throw new FormatException($"Can't resolve '{h}'.");
             list.Add(new IPEndPoint(ip, port));
         }
-        lock (_targetsGate) { _targets = list; _lastSent.Clear(); }
+        return list;
     }
 
     private async Task ReceiveLoop()
@@ -69,9 +89,15 @@ public sealed class OscControlServer : IDisposable
 
             IReadOnlyList<OscMessage> msgs;
             try { msgs = Osc.Decode(r.Buffer); }
-            catch (FormatException ex) { _host.Log($"[osc {r.RemoteEndPoint}] bad packet: {ex.Message}"); continue; }
+            catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException or OverflowException)
+            { _host.Log($"[osc {r.RemoteEndPoint}] bad packet: {ex.Message}"); continue; }
 
-            foreach (var m in msgs) Handle(m, r.RemoteEndPoint);
+            foreach (var m in msgs)
+            {
+                try { Handle(m, r.RemoteEndPoint); }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                { _host.Log($"[osc {r.RemoteEndPoint}] {m.Address}: {ex.Message}"); }
+            }
         }
     }
 

@@ -72,7 +72,8 @@ public sealed class AudioClock : IClock
     }
 
     /// <summary>Time at which rendered sample <paramref name="sample"/> is heard.</summary>
-    public double HeardTime(long sample, int latencySamples) => _base + (double)(sample - latencySamples) / _sampleRate;
+    /// <remarks><see cref="Now"/> already lags the rendered count by the output latency, so sample <c>n</c> is heard at <c>n / rate</c>.</remarks>
+    public double HeardTime(long sample) => _base + (double)sample / _sampleRate;
 
     public double Now
     {
