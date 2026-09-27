@@ -35,7 +35,7 @@ Every command and setting has a human-readable name, description and list of all
 | Surface | Example |
 |---|---|
 | Text command (app Control tab, console `:`, stdin, WebSocket) | `locate 01:00:00:00` · `duration 5m` · `set level -18` · `mode count-down` · `help` · `settings` |
-| Browser remote | `http://<computer>:8480/` on any phone, tablet or PC on the network |
+| Browser remote | `http://<computer>:8480/?token=<http-token>` on any phone, tablet or PC on the network (after `http-bind all`; see Network access below) |
 | HTTP | `GET /api/status` · `GET /api/settings` · `GET /api/commands` · `GET /api/play` · `GET /api/locate/10:00:00:00` · `GET /api/set?name=duration&value=10m` · `POST /api/command` (body = command line) |
 | WebSocket | `ws://<computer>:8480/ws`: status JSON pushed at `status-rate`; send command lines as text |
 | OSC (UDP 9000) | `/chronos/play` · `/chronos/locate "01:00:00:00"` · `/chronos/set/duration 300` · `/chronos/cmd "nudge +1s"` · `/chronos/status` → reply. Button messages (1 press / 0 release) trigger once. `osc-feedback host:port` streams `/chronos/display`, `/timecode`, `/state`, `/phase`, `/remaining`, … |
@@ -52,7 +52,7 @@ chronos-timer --mode timecode --start 10:00:00:00 --rate 29.97df --output on --p
 chronos-timer --mode time-of-day --user-bits-mode date --output on --play
 chronos-timer --mode chase --input on --output on --play
 chronos-timer --headless < commands.txt               no display; commands on stdin; keeps serving remote control
-chronos-timer send 192.168.1.20 locate 01:00:00:00    remote-control another running timer
+chronos-timer send --token <t> 192.168.1.20 locate 01:00:00:00    remote-control another running timer
 chronos-timer status studio-pc:8480
 chronos-timer settings | commands | devices | help
 ```
@@ -86,4 +86,5 @@ dotnet build apps/ChronosTimer.App -f net10.0-android     # needs the MAUI workl
 * **Latency.** The code chosen for each codeword is the address at the moment it leaves the converter (buffered audio is accounted for). Use `output-offset` (ms) to make up for delay after the computer (e.g. a video pipeline). Smaller `buffer` = less latency, larger = safer.
 * **29.97 NDF / 23.98 time of day.** Non-drop NTSC labels can't follow the clock at their real rate (they run 0.1 % slow); the output re-locks to the clock label, skipping a frame about every 33 s. Use 29.97 DF, 25 or 30 for time-of-day code.
 * **Reverse / remaining.** Code whose address runs down is sent bit-reversed, exactly what a reader sees from reverse play.
-* **Firewall.** Allow `chronos-timer` / Chronos Timer for TCP 8480 and UDP 9000 when asked (or change `http-port` / `osc-port`). `http-local-only on` restricts HTTP to this computer.
+* **Network access.** HTTP and OSC listen on this computer only by default. Set `http-bind` / `osc-bind` to `all` or to one network interface (e.g. `http-bind eth0`, `osc-bind "Ethernet 2"`; `get http-bind` lists this computer's interfaces) to control the timer from other devices. Every HTTP / WebSocket request needs the `http-token` (a random one is made on first run; `http-token new` makes another). The remote links shown by the timer include it, and the browser remote keeps it in a cookie after the first visit. Other tools send it as `X-Chronos-Token: <token>` or `Authorization: Bearer <token>`. Pages on other sites can't call the API unless listed in `http-origins`. OSC has no password, so bind it to the show network. A remote can `save` / `load` the settings file but not choose another file.
+* **Firewall.** Allow `chronos-timer` / Chronos Timer for TCP 8480 and UDP 9000 when asked (or change `http-port` / `osc-port`).

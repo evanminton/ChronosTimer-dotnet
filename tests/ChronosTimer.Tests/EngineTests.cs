@@ -203,6 +203,46 @@ public class EngineTests
     }
 
     [Fact]
+    public void Reverse_continue_resumes_below_zero()
+    {
+        var (e, c) = Make();
+        e.Mode = TimerMode.CountDown;
+        e.Duration = TimeSpan.FromSeconds(10);
+        e.EndAction = EndAction.Continue;
+        e.Reverse = true;
+        e.Play();
+        c.Advance(3);
+        e.Pause();
+        Assert.Equal("0:13", e.GetStatus().Display);
+        e.Play(); // resumes, doesn't jump back to the end
+        Assert.Equal("0:13", e.GetStatus().Display);
+    }
+
+    [Fact]
+    public void Switching_to_time_of_day_while_paused_holds_the_time()
+    {
+        var (e, c) = Make();
+        e.Rate = LtcFrameRate.Fps25;
+        e.Mode = TimerMode.CountUp;
+        e.Play();
+        c.Advance(5);
+        e.Pause();
+        e.Mode = TimerMode.TimeOfDay;
+        Assert.Equal("14:30:00:00", e.GetStatus().Display);
+    }
+
+    [Fact]
+    public void Audio_clock_heard_time_matches_now()
+    {
+        var ac = new AudioClock(5, 48_000);
+        ac.OnCallback(renderedSamples: 960, count: 480, latencySamples: 960);
+        // Right at the callback the sample being heard is 960 samples behind the rendered count: sample 0.
+        Assert.Equal(5.0, ac.HeardTime(0), 9);
+        Assert.Equal(5.0 + 960 / 48_000.0, ac.HeardTime(960), 9);
+        Assert.InRange(ac.Now, 5.0, 5.0 + 2 * 480 / 48_000.0);
+    }
+
+    [Fact]
     public void Mode_switch_keeps_transport()
     {
         var (e, c) = Make();

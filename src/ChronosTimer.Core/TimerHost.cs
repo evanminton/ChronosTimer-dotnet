@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using ChronosTimer.Audio;
 using ChronosTimer.Control;
@@ -36,11 +38,16 @@ public sealed class TimerHost : IDisposable
     // control
     private HttpControlServer? _http;
     private OscControlServer? _osc;
-    private bool _httpEnabled = true, _httpLocalOnly, _oscEnabled = true;
+    private bool _httpEnabled = true, _oscEnabled = true;
     private int _httpPort = 8480, _oscPort = 9000;
+    private string _httpBind = NetworkBinding.Localhost, _oscBind = NetworkBinding.Localhost;
+    private string _httpToken = NewToken(), _httpOrigins = "";
     private string _oscFeedback = "";
     private double _pushRate = 20;
     private bool _suspendApply;
+
+    // Source of the command running on this thread (null = local UI / console).
+    [ThreadStatic] private static string? t_source;
 
     public TimerHost(IAudioBackend? audio = null, TimerEngine? engine = null)
     {
@@ -100,7 +107,11 @@ public sealed class TimerHost : IDisposable
     /// <summary>Runs a text command. <paramref name="source"/> (e.g. "http 10.0.0.5") is logged for remote commands.</summary>
     public CommandResult Execute(string line, string? source = null)
     {
-        var r = Commands.Execute(line);
+        string? prev = t_source;
+        t_source = source;
+        CommandResult r;
+        try { r = Commands.Execute(line); }
+        finally { t_source = prev; }
         if (source is not null) Log($"[{source}] {line.Trim()} → {(r.Ok ? r.Message.Split('\n')[0] : "error: " + r.Message)}");
         return r;
     }
@@ -250,9 +261,11 @@ public sealed class TimerHost : IDisposable
         if (!_httpEnabled) return;
         try
         {
-            _http = new HttpControlServer(this, _httpPort, _httpLocalOnly);
+            var origins = _httpOrigins.Split([',', ' ', ';'], StringSplitOptions.RemoveEmptyEntries);
+            _http = new HttpControlServer(this, BindAddress(_httpBind, "HTTP"), _httpPort, _httpToken, origins);
             _http.Start();
-            Log($"HTTP/WebSocket control on port {_http.Port}: {string.Join("  ", _http.Urls)}");
+            Log($"HTTP/WebSocket control on {_http.BindAddress} port {_http.Port}: {string.Join("  ", _http.Urls)}"
+                + (_httpToken.Length == 0 ? "  (no access token: anyone who can reach it has full control)" : ""));
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -269,16 +282,40 @@ public sealed class TimerHost : IDisposable
         if (!_oscEnabled) return;
         try
         {
-            _osc = new OscControlServer(this, _oscPort);
-            _osc.SetFeedbackTargets(_oscFeedback);
+            _osc = new OscControlServer(this, _oscPort, BindAddress(_oscBind, "OSC"));
+            try { _osc.SetFeedbackTargets(_oscFeedback); }
+            catch (FormatException ex) { Log("OSC feedback off: " + ex.Message); }
             _osc.Start();
-            Log($"OSC control on UDP port {_osc.Port} (address prefix /chronos)" + (_oscFeedback.Length > 0 ? $", feedback to {_oscFeedback}" : ""));
+            Log($"OSC control on {_osc.BindAddress} UDP port {_osc.Port} (address prefix /chronos)" + (_oscFeedback.Length > 0 ? $", feedback to {_oscFeedback}" : ""));
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             _osc = null;
             Log($"OSC control could not start on port {_oscPort}: {ex.Message}");
         }
+    }
+
+    /// <summary>The address for a bind setting; falls back to this computer only when the interface is gone.</summary>
+    private IPAddress BindAddress(string bind, string what)
+    {
+        if (NetworkBinding.Resolve(bind) is { } ip) return ip;
+        Log($"{what}: network interface '{bind}' not found or down; listening on this computer only.");
+        return IPAddress.Loopback;
+    }
+
+    private static string NewToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+
+    private static string ParseToken(string v)
+    {
+        switch (v.Trim().ToLowerInvariant())
+        {
+            case "" or "off" or "none": return "";
+            case "new" or "generate" or "random": return NewToken();
+        }
+        string t = v.Trim();
+        if (t.Length < 8 || t.Length > 128 || !t.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' or '~'))
+            throw new FormatException("The token must be 8–128 letters, digits, '-', '_', '.' or '~' (or 'new' for a random one, 'off' for none).");
+        return t;
     }
 
     // ═════════════════════════════ persistence ═════════════════════════════
@@ -308,6 +345,7 @@ public sealed class TimerHost : IDisposable
         {
             foreach (var (k, v) in values)
             {
+                if (k.Equals("http-local-only", StringComparison.OrdinalIgnoreCase)) continue; // replaced by http-bind (default localhost)
                 if (FindSetting(k) is not { } s) { problems.Add($"unknown setting '{k}'"); continue; }
                 try { s.Set(v); }
                 catch (Exception ex) when (ex is FormatException or ArgumentException or InvalidOperationException) { problems.Add($"{k}: {ex.Message}"); }
@@ -474,14 +512,25 @@ public sealed class TimerHost : IDisposable
             () => Setting.Bool(_httpEnabled), v => { _httpEnabled = Setting.ParseBool(v); ApplyHttp(); }));
         Add(new Setting("http-port", R, SettingKind.Number, "TCP port for HTTP / WebSocket.",
             () => _httpPort.ToString(CultureInfo.InvariantCulture), v => { _httpPort = (int)Setting.ParseNumber(v, 1, 65_535); ApplyHttp(); }));
-        Add(new Setting("http-local-only", R, SettingKind.Toggle, "Accept HTTP only from this computer.",
-            () => Setting.Bool(_httpLocalOnly), v => { _httpLocalOnly = Setting.ParseBool(v); ApplyHttp(); }));
+        Add(new Setting("http-bind", R, SettingKind.Choice, "Network interface HTTP listens on: localhost (this computer only), all, or one interface (e.g. the show network).",
+            () => _httpBind, v => { _httpBind = NetworkBinding.Normalize(v); ApplyHttp(); }, dynamicOptions: NetworkBinding.Options));
+        Add(new Setting("http-token", R, SettingKind.Text, "Access token for HTTP / WebSocket / the browser remote ('new' = random, 'off' = none: anyone who can reach the port has control).",
+            () => _httpToken, v => { _httpToken = ParseToken(v); ApplyHttp(); }));
+        Add(new Setting("http-origins", R, SettingKind.Text, "Other web pages allowed to call the API, e.g. http://dashboard:3000 (comma-separated; * = any; they still need the token).",
+            () => _httpOrigins, v => { _httpOrigins = v; ApplyHttp(); }));
         Add(new Setting("osc", R, SettingKind.Toggle, "OSC control over UDP (address prefix /chronos).",
             () => Setting.Bool(_oscEnabled), v => { _oscEnabled = Setting.ParseBool(v); ApplyOsc(); }));
         Add(new Setting("osc-port", R, SettingKind.Number, "UDP port for OSC.",
             () => _oscPort.ToString(CultureInfo.InvariantCulture), v => { _oscPort = (int)Setting.ParseNumber(v, 1, 65_535); ApplyOsc(); }));
+        Add(new Setting("osc-bind", R, SettingKind.Choice, "Network interface OSC listens on: localhost (this computer only), all, or one interface. OSC has no password, so pick the show network.",
+            () => _oscBind, v => { _oscBind = NetworkBinding.Normalize(v); ApplyOsc(); }, dynamicOptions: NetworkBinding.Options));
         Add(new Setting("osc-feedback", R, SettingKind.Text, "Send OSC status to these host:port targets (comma-separated; empty = none).",
-            () => _oscFeedback, v => { _oscFeedback = v; if (_osc is not null) _osc.SetFeedbackTargets(v); }));
+            () => _oscFeedback, v =>
+            {
+                OscControlServer.ParseTargets(v); // validate (and resolve) before storing
+                _oscFeedback = v;
+                _osc?.SetFeedbackTargets(v);
+            }));
         Add(new Setting("status-rate", R, SettingKind.Number, "Status pushes per second (WebSocket and OSC feedback).",
             () => Setting.Number(_pushRate), v => _pushRate = Setting.ParseNumber(v, 1, 60), unit: "Hz"));
     }
@@ -489,6 +538,9 @@ public sealed class TimerHost : IDisposable
     // ═════════════════════════════ commands ═════════════════════════════
 
     private CommandResult Ok(string m) => CommandResult.Success(m);
+
+    private static CommandResult LocalOnly(string cmd) =>
+        CommandResult.Error($"{cmd} with a file name only works on this computer; remote control can use '{cmd}' (the settings file).");
 
     private string Short() { var s = Status; return $"{s.Display}  {Setting.Token(s.State)}"; }
 
@@ -558,10 +610,12 @@ public sealed class TimerHost : IDisposable
             (a, raw) => Ok(SettingsText(raw)), "config", "options");
         c.Add("status", "status", "Show the timer status.", (_, _) => Ok(StatusText()), "st", "?");
         c.Add("devices", "devices", "List audio devices.", (_, _) => Ok(DevicesText()));
-        c.Add("save", "save [file]", "Save the settings (default: the settings file).", (a, raw) => Ok("saved " + Save(raw.Length > 0 ? raw : null)));
-        c.Add("load", "load [file]", "Load settings from a file.",
+        c.Add("save", "save [file]", "Save the settings (default: the settings file; another file only from this computer's UI).",
+            (a, raw) => raw.Length > 0 && t_source is not null ? LocalOnly("save") : Ok("saved " + Save(raw.Length > 0 ? raw : null)));
+        c.Add("load", "load [file]", "Load settings from a file (another file only from this computer's UI).",
             (a, raw) =>
             {
+                if (raw.Length > 0 && t_source is not null) return LocalOnly("load");
                 string path = raw.Length > 0 ? raw : SettingsPath ?? SettingsFile.DefaultPath();
                 var p = Load(path);
                 Start();

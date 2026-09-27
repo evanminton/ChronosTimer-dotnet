@@ -15,8 +15,8 @@ chronos-timer — portable, remote-controllable timer with SMPTE LTC output and 
 USAGE
   chronos-timer [options] [--<setting> <value> …]     run the timer (full-screen console display)
   chronos-timer --headless [options]                  run without a display; commands on stdin, one per line
-  chronos-timer send <host[:port]> <command …>        send a command to a running Chronos Timer (HTTP)
-  chronos-timer status <host[:port]>                  print a running timer's status (JSON)
+  chronos-timer send [--token <t>] <host[:port]> <command …>   send a command to a running Chronos Timer (HTTP)
+  chronos-timer status [--token <t>] <host[:port]>             print a running timer's status (JSON)
   chronos-timer help | commands | settings [name] | devices    reference
 
 OPTIONS
@@ -29,6 +29,12 @@ OPTIONS
   --headless          no display: read commands from stdin, print results
   --<setting> <value> any setting, e.g. --mode count-down --duration 10m --output on --level -18
                       (a toggle given without a value means on: --output)
+  --token <t>         (send/status) the remote's http-token; default: $CHRONOS_TOKEN, else the local settings file
+
+REMOTE CONTROL
+  HTTP listens on this computer only by default: --http-bind all (or an interface name, e.g. --http-bind eth0) opens
+  it to the network; 'chronos-timer settings http-bind' lists the interfaces. Every request needs the http-token
+  (shown in the remote links). OSC: --osc-bind, same choices.
 
 EXAMPLES
   chronos-timer --mode timecode --start 01:00:00:00 --rate 25 --output on --play
@@ -60,8 +66,8 @@ KEYS (console display)
                         return 0;
                     case "send":
                         return Send(args.Skip(1).ToArray());
-                    case "status" when args.Length == 2:
-                        return Send([args[1], "__status"]);
+                    case "status":
+                        return Send([.. args.Skip(1), "__status"]);
                     case "commands" or "settings" or "devices":
                         {
                             using var h = new TimerHost(AudioBackends.CreateDefault());
@@ -85,25 +91,66 @@ KEYS (console display)
 
     private static int Send(string[] args)
     {
-        if (args.Length < 2) { Console.Error.WriteLine("usage: chronos-timer send <host[:port]> <command …>"); return 2; }
+        string? token = null;
+        if (args.Length > 0 && args[0].StartsWith("--token", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args[0].Contains('=')) { token = args[0][(args[0].IndexOf('=') + 1)..]; args = args[1..]; }
+            else if (args.Length > 1) { token = args[1]; args = args[2..]; }
+            else args = [];
+        }
+        if (args.Length < 2) { Console.Error.WriteLine("usage: chronos-timer send [--token <t>] <host[:port]> <command …>"); return 2; }
+        token ??= Environment.GetEnvironmentVariable("CHRONOS_TOKEN") ?? LocalToken();
+
         string host = args[0];
         if (!host.Contains("://", StringComparison.Ordinal)) host = "http://" + host;
-        var uri = new UriBuilder(host);
+        UriBuilder uri;
+        try { uri = new UriBuilder(host); }
+        catch (UriFormatException) { Console.Error.WriteLine($"chronos-timer: '{args[0]}' is not a host[:port]."); return 2; }
         if (uri.Port is 80 or -1 && !args[0].Contains(':')) uri.Port = 8480;
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        if (args[1] == "__status")
+        if (!string.IsNullOrEmpty(token)) http.DefaultRequestHeaders.Add("X-Chronos-Token", token);
+        try
         {
-            uri.Path = "/api/status";
-            Console.WriteLine(http.GetStringAsync(uri.Uri).GetAwaiter().GetResult());
-            return 0;
+            if (args[1] == "__status")
+            {
+                uri.Path = "/api/status";
+                using var st = http.GetAsync(uri.Uri).GetAwaiter().GetResult();
+                string sb = st.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                if (!st.IsSuccessStatusCode) { Console.Error.WriteLine($"chronos-timer: {uri.Host}:{uri.Port}: {(int)st.StatusCode} {Message(sb)}"); return 1; }
+                Console.WriteLine(sb);
+                return 0;
+            }
+            uri.Path = "/api/command";
+            string line = string.Join(' ', args.Skip(1).Select(a => a.Contains(' ') ? "\"" + a + "\"" : a));
+            using var resp = http.PostAsync(uri.Uri, new StringContent(line, Encoding.UTF8, "text/plain")).GetAwaiter().GetResult();
+            string body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            Console.WriteLine(Message(body));
+            return resp.IsSuccessStatusCode ? 0 : 1;
         }
-        uri.Path = "/api/command";
-        string line = string.Join(' ', args.Skip(1).Select(a => a.Contains(' ') ? "\"" + a + "\"" : a));
-        using var resp = http.PostAsync(uri.Uri, new StringContent(line, Encoding.UTF8, "text/plain")).GetAwaiter().GetResult();
-        string body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-        var d = Control.Json.ReadFlat(body);
-        Console.WriteLine(d.GetValueOrDefault("message", body));
-        return resp.IsSuccessStatusCode ? 0 : 1;
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            string why = ex is TaskCanceledException ? "no answer (timed out)" : ex.Message;
+            Console.Error.WriteLine($"chronos-timer: can't reach {uri.Host}:{uri.Port}: {why}");
+            return 2;
+        }
+    }
+
+    /// <summary>The "message" of a JSON result, or the body as is when it isn't one.</summary>
+    private static string Message(string body)
+    {
+        try { return Control.Json.ReadFlat(body).GetValueOrDefault("message", body); }
+        catch (FormatException) { return body; }
+    }
+
+    /// <summary>http-token from this computer's settings file (so 'send localhost …' just works).</summary>
+    private static string? LocalToken()
+    {
+        try
+        {
+            string path = SettingsFile.DefaultPath();
+            return File.Exists(path) ? Control.Json.ReadFlat(File.ReadAllText(path)).GetValueOrDefault("http-token") : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException) { return null; }
     }
 
     // ───────────────────────────── run ─────────────────────────────
