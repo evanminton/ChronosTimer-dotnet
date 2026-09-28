@@ -75,7 +75,7 @@ chronos-timer settings | commands | devices | help
 
 * **Timer**: big auto-sizing display colored by phase, progress bar, play/pause, stop, reset, restart, ±frame/second, ±minute, jam, reverse, mode buttons, locate and duration entry, LTC out/in switches, signal and remote status.
 * **Settings**: every setting from the catalog, grouped, with its description, default and allowed values; saved automatically.
-* **Show**: the master's running time, the cue light (with acknowledge on followers), messages, the show schedule with date/time pickers and the HOLD button, and the link role.
+* **Show**: the master's running time, six large cue buttons whose active one lights up as the cue light (display only, with acknowledge, on followers), messages, the show schedule with date/time pickers and the HOLD button, and the link role.
 * **Control**: browser-remote/HTTP/OSC addresses, a command line, the full command reference and the log.
 
 Android uses AudioTrack/AudioRecord; iOS and Mac use Audio Queues (system default device), Windows uses WinMM (any device). The app keeps the screen on while the timer page is open; on iOS it keeps running in the background (audio background mode).

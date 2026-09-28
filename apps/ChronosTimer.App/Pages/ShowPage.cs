@@ -5,15 +5,16 @@ using ChronosTimer.Show;
 namespace ChronosTimer.App.Pages;
 
 /// <summary>
-/// The show display: the master's running time with the cue light and messages, plus the show schedule (start / end
-/// pickers and the hold button) and the link between timers.
+/// The show display: the master's running time with the cue tiles (the lit tile is the cue light) and messages, plus
+/// the show schedule (start / end pickers and the hold button) and the link between timers. Wide landscape windows put
+/// the time across the top with the cue tiles bottom left and messages bottom right; everything else stacks them.
 /// </summary>
 public sealed class ShowPage : ContentPage
 {
-    private readonly Label _source, _display, _detail, _cueText, _acks, _scheduleStatus, _linkStatus, _message;
+    private readonly Label _source, _display, _detail, _latestText, _acks, _scheduleStatus, _linkStatus, _message;
     private readonly ProgressBar _progress;
-    private readonly Border _cueLight;
-    private readonly FlexLayout _cueButtons;
+    private readonly Border _latest;
+    private readonly Grid _cueGrid, _timeCell;
     private readonly Button _ack, _hold;
     private readonly VerticalStackLayout _messages, _scheduleSection;
     private readonly Entry _messageEntry, _preroll;
@@ -26,6 +27,11 @@ public sealed class ShowPage : ContentPage
     private int _shownMessages = -1;
     private string _recipients = "";
     private int _lastLen;
+    private readonly Dictionary<CueLight, CueTile> _tiles = new();
+    private readonly VerticalStackLayout _timeBox, _cuePanel, _messagesPanel;
+    private readonly ContentView _top = new();
+    private string _layoutKey = "";
+    private bool _sideBySide;
 
     private static TimerHost Host => AppHost.Host;
     private static ShowController Show => AppHost.Host.Show;
@@ -49,25 +55,23 @@ public sealed class ShowPage : ContentPage
         _detail = new Label { FontSize = 16, TextColor = Ui.Muted, HorizontalTextAlignment = TextAlignment.Center };
         _progress = new ProgressBar { ProgressColor = Ui.Accent, BackgroundColor = Ui.Panel, HeightRequest = 6, Margin = new Thickness(0, 10, 0, 6) };
 
-        // ── cue light ──
-        _cueText = new Label { FontSize = 30, FontAttributes = FontAttributes.Bold, CharacterSpacing = 3, HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center };
-        _cueLight = new Border
-        {
-            Content = _cueText,
-            HeightRequest = 96,
-            StrokeThickness = 2,
-            Margin = new Thickness(0, 8),
-            StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 20 },
-        };
-        _cueButtons = Ui.Row();
+        _timeBox = new VerticalStackLayout { VerticalOptions = LayoutOptions.Center, Children = { _source, _display, _detail, _progress } };
+        _timeCell = new Grid { Children = { _timeBox } };
+
+        // ── cue tiles: one per cue, the active one lit as the cue light ──
+        _cueGrid = new Grid { ColumnSpacing = 10, RowSpacing = 10, Margin = new Thickness(0, 6, 0, 2) };
         foreach (var cue in Enum.GetValues<CueLight>())
         {
-            var b = Ui.Button(Setting.Token(cue).ToUpperInvariant(), () => Run("cue " + Setting.Token(cue)));
-            b.BorderColor = CueColor(cue, true);
-            _cueButtons.Children.Add(b);
+            var tile = new CueTile(cue);
+            var tap = new TapGestureRecognizer();
+            tap.Tapped += (_, _) => { if (Show.Role != LinkRole.Follower) Run("cue " + Setting.Token(cue)); };
+            tile.GestureRecognizers.Add(tap);
+            _tiles[cue] = tile;
         }
         _ack = Ui.Button("✓  Acknowledge cue", () => Run("cue ack"), primary: true);
         _acks = Ui.Caption("");
+        _acks.HorizontalTextAlignment = TextAlignment.Center;
+        _cuePanel = new VerticalStackLayout { Spacing = 4, Children = { _cueGrid, _ack, _acks } };
 
         // ── messages ──
         _messages = new VerticalStackLayout { Spacing = 2 };
@@ -82,6 +86,19 @@ public sealed class ShowPage : ContentPage
         var quick = Ui.Row();
         foreach (string q in new[] { "Standby", "Places please", "5 minutes", "Holding", "Go when ready", "Copy that" })
             quick.Children.Add(Ui.Button(q, () => Run("message " + Target() + q)));
+        _messagesPanel = new VerticalStackLayout { Children = { Ui.Heading("Messages"), Ui.Card(_messages), msgRow, quick } };
+        _latestText = new Label { FontSize = 18, FontAttributes = FontAttributes.Bold, TextColor = Ui.Text, LineBreakMode = LineBreakMode.WordWrap };
+        _latest = new Border
+        {
+            Content = _latestText,
+            BackgroundColor = Ui.Panel,
+            Stroke = Ui.Accent,
+            StrokeThickness = 2,
+            Padding = new Thickness(14, 10),
+            Margin = new Thickness(0, 6),
+            StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 10 },
+            IsVisible = false,
+        };
 
         // ── schedule ──
         var today = DateTime.Today;
@@ -147,9 +164,7 @@ public sealed class ShowPage : ContentPage
             Spacing = 4,
             Children =
             {
-                _source, _display, _detail, _progress,
-                _cueLight, _cueButtons, _ack, _acks,
-                Ui.Heading("Messages"), Ui.Card(_messages), msgRow, quick,
+                _top,
                 _scheduleSection,
                 Ui.Heading("Link"), roles, _linkStatus,
                 Ui.Caption("Timers on the same network find each other: set one to Master and the others to Follower. By default they use the 169.254.x.x (APIPA) network of a direct cable or switch without DHCP. More in Settings › Link."),
@@ -157,7 +172,8 @@ public sealed class ShowPage : ContentPage
             },
         };
         Content = new ScrollView { Content = stack };
-        SizeChanged += (_, _) => FitDisplay(force: true);
+        SizeChanged += (_, _) => { ApplyLayout(); FitDisplay(force: true); };
+        ApplyLayout();
     }
 
     private static Color CueColor(CueLight cue, bool lit) => cue switch
@@ -266,12 +282,9 @@ public sealed class ShowPage : ContentPage
 
         bool blink = v.Cue is CueLight.Standby or CueLight.End;
         bool lit = v.Cue != CueLight.Off && (!blink || flash);
-        _cueLight.BackgroundColor = v.Cue == CueLight.Off ? Ui.Panel : CueColor(v.Cue, lit);
-        _cueLight.Stroke = v.Cue == CueLight.Off ? Ui.Line : CueColor(v.Cue, true);
-        _cueText.Text = v.Cue == CueLight.Off ? "CUE OFF" : Setting.Token(v.Cue).ToUpperInvariant();
-        _cueText.TextColor = v.Cue == CueLight.Off ? Ui.Muted : lit ? Color.FromArgb("#0B1416") : Ui.Text;
+        foreach (var (cue, tile) in _tiles)
+            tile.Update(active: cue == v.Cue, lit, blink, dimmed: role == LinkRole.Follower && cue != v.Cue);
 
-        _cueButtons.IsVisible = role != LinkRole.Follower;
         _ack.IsVisible = role == LinkRole.Follower;
         _scheduleSection.IsVisible = role != LinkRole.Follower;
         var followers = Show.Followers;
@@ -304,6 +317,7 @@ public sealed class ShowPage : ContentPage
             _recipient.SelectedIndex = i;
         }
         _recipient.IsVisible = role == LinkRole.Master;
+        _latest.IsVisible = !_sideBySide && !string.IsNullOrEmpty(_latestText.Text);
 
         var msgs = Show.Messages;
         if (msgs.Count != _shownMessages)
@@ -311,6 +325,9 @@ public sealed class ShowPage : ContentPage
             _shownMessages = msgs.Count;
             _messages.Children.Clear();
             if (msgs.Count == 0) _messages.Children.Add(Ui.Caption(role == LinkRole.Off ? "Link timers to send messages." : "No messages yet."));
+            var last = msgs.Count > 0 ? msgs[^1] : null;
+            _latestText.Text = last?.ToString() ?? "";
+            _latest.Stroke = last?.To is not null ? Ui.Warning : Ui.Accent;
             foreach (var m in msgs.TakeLast(30).Reverse())
             {
                 bool mine = m.From == Show.NodeName;
@@ -332,8 +349,110 @@ public sealed class ShowPage : ContentPage
         if (!force && len == _lastLen) return;
         _lastLen = len;
         double w = Width > 0 ? Width - 32 : 800;
-        double size = Math.Clamp(w / (len * 0.62), 28, 220);
-        if (Height > 0) size = Math.Min(size, Height * 0.26);
+        double size = Math.Clamp(w / (len * 0.62), 28, 320);
+        if (Height > 0) size = Math.Min(size, Height * (_sideBySide ? 0.34 : 0.28));
         _display.FontSize = size;
+    }
+
+    /// <summary>
+    /// Wide landscape: time across the top, cue tiles bottom left, messages bottom right. Otherwise the time, the cue
+    /// tiles (six across, or three or two on narrow screens), the newest message and the message list stack.
+    /// </summary>
+    private void ApplyLayout()
+    {
+        bool side = Width >= 900 && Width > Height * 1.25;
+        double w = Width > 0 ? Width - 32 : 800;
+        int cols = side ? 3 : w >= 640 ? 6 : w >= 360 ? 3 : 2;
+        double h = Height > 0 ? Height : 700;
+        double tileHeight = side ? Math.Clamp(h * 0.12, 56, 120) : Math.Clamp(h * 0.15, 64, 150);
+        double colWidth = ((side ? w / 2 - 12 : w) - 10 * (cols - 1)) / cols;
+        double font = Math.Clamp(Math.Min(tileHeight * 0.22, colWidth * 0.11), 12, 32);
+        foreach (var tile in _tiles.Values) tile.Size(tileHeight, font);
+        _timeCell.MinimumHeightRequest = side ? h * 0.5 : 0;
+
+        string key = side + "/" + cols;
+        if (key == _layoutKey) return;
+        _layoutKey = key;
+        _sideBySide = side;
+
+        _cueGrid.Clear();
+        _cueGrid.ColumnDefinitions.Clear();
+        _cueGrid.RowDefinitions.Clear();
+        for (int c = 0; c < cols; c++) _cueGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
+        int i = 0;
+        foreach (var tile in _tiles.Values)
+        {
+            if (i % cols == 0) _cueGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+            _cueGrid.Add(tile, i % cols, i / cols);
+            i++;
+        }
+
+        foreach (var v in new View[] { _timeCell, _cuePanel, _latest, _messagesPanel })
+            (v.Parent as Layout)?.Remove(v);
+        _top.Content = null;
+        _acks.HorizontalTextAlignment = side ? TextAlignment.Start : TextAlignment.Center;
+        _cuePanel.VerticalOptions = _messagesPanel.VerticalOptions = side ? LayoutOptions.End : LayoutOptions.Start;
+        if (side)
+        {
+            var grid = new Grid
+            {
+                ColumnDefinitions = { new(GridLength.Star), new(GridLength.Star) },
+                RowDefinitions = { new(GridLength.Auto), new(GridLength.Auto) },
+                ColumnSpacing = 24,
+            };
+            grid.Add(_timeCell, 0, 0);
+            grid.SetColumnSpan(_timeCell, 2);
+            grid.Add(_cuePanel, 0, 1);
+            grid.Add(_messagesPanel, 1, 1);
+            _top.Content = grid;
+        }
+        else
+        {
+            _top.Content = new VerticalStackLayout { Children = { _timeCell, _cuePanel, _latest, _messagesPanel } };
+        }
+        _latest.IsVisible = !side && !string.IsNullOrEmpty(_latestText.Text);
+    }
+
+    /// <summary>A large cue button. The active tile fills with its colour (flashing for standby and end) and is the cue light.</summary>
+    private sealed class CueTile : Border
+    {
+        private static readonly Color Ink = Color.FromArgb("#0B1416");
+        private readonly CueLight _cue;
+        private readonly Label _name, _flashing;
+        private string _state = "";
+
+        public CueTile(CueLight cue)
+        {
+            _cue = cue;
+            _name = new Label { Text = Setting.Token(cue).ToUpperInvariant(), FontAttributes = FontAttributes.Bold, CharacterSpacing = 2, HorizontalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.NoWrap };
+            _flashing = new Label { Text = "FLASHING", FontSize = 11, CharacterSpacing = 1.5, FontAttributes = FontAttributes.Bold, HorizontalTextAlignment = TextAlignment.Center, IsVisible = false };
+            Content = new VerticalStackLayout { VerticalOptions = LayoutOptions.Center, Spacing = 2, Children = { _name, _flashing } };
+            StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 14 };
+            Padding = new Thickness(4);
+            SemanticProperties.SetDescription(this, "Cue " + _name.Text);
+        }
+
+        public void Size(double height, double font)
+        {
+            HeightRequest = height;
+            _name.FontSize = font;
+            _flashing.FontSize = Math.Max(9, font * 0.45);
+        }
+
+        public void Update(bool active, bool lit, bool blink, bool dimmed)
+        {
+            string state = $"{active}{lit}{blink}{dimmed}";
+            if (state == _state) return;
+            _state = state;
+            bool off = _cue == CueLight.Off;
+            bool filled = active && lit && !off;
+            BackgroundColor = filled ? CueColor(_cue, true) : off ? Ui.Panel : CueColor(_cue, false);
+            Stroke = off ? (active ? Ui.Muted : Ui.Line) : CueColor(_cue, true);
+            StrokeThickness = active ? 5 : 2;
+            Opacity = dimmed ? 0.45 : 1;
+            _name.TextColor = filled ? Ink : off && !active ? Ui.Muted : Ui.Text;
+            _flashing.TextColor = _name.TextColor;
+            _flashing.IsVisible = active && blink;
+        }
     }
 }
