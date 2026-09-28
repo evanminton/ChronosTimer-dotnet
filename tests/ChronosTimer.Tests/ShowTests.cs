@@ -110,6 +110,76 @@ public class ShowScheduleTests
     }
 
     [Fact]
+    public void Preroll_rolls_before_the_start()
+    {
+        var s = new ShowSchedule { Preroll = TimeSpan.FromSeconds(5) };
+        s.Set(At(60), At(660));
+
+        Assert.Equal(ShowPhase.Waiting, s.Evaluate(At(54)).Phase);
+        var p = s.Evaluate(At(55));
+        Assert.Equal(ShowPhase.Preroll, p.Phase);
+        Assert.False(p.Started);
+        Assert.Equal(At(55), p.PrerollStart);
+        Assert.Equal(TimeSpan.FromSeconds(5), p.UntilStart);
+        Assert.Equal(TimeSpan.FromSeconds(-5), p.Elapsed);
+        Assert.Equal(TimeSpan.FromSeconds(-2), s.Evaluate(At(58)).Elapsed);
+
+        var r = s.Evaluate(At(60));
+        Assert.Equal(ShowPhase.Running, r.Phase);
+        Assert.Equal(TimeSpan.Zero, r.Elapsed);
+        Assert.Throws<ArgumentOutOfRangeException>(() => s.Preroll = TimeSpan.FromSeconds(-1));
+    }
+
+    [Fact]
+    public void Hold_delays_the_preroll_too()
+    {
+        var s = new ShowSchedule { Preroll = TimeSpan.FromSeconds(5) };
+        s.Set(At(60), At(660));
+        s.Hold(At(30));
+        Assert.Equal(ShowPhase.Holding, s.Evaluate(At(70)).Phase);
+
+        s.Release(At(80)); // 25 s past the preroll point: the preroll runs in full from the release
+        var p = s.Evaluate(At(80));
+        Assert.Equal(ShowPhase.Preroll, p.Phase);
+        Assert.Equal(At(85), p.EffectiveStart);
+        Assert.Equal(At(685), p.EffectiveEnd);
+        Assert.Equal(TimeSpan.FromSeconds(25), p.Delay);
+        Assert.Equal(TimeSpan.FromSeconds(-5), p.Elapsed);
+        Assert.Equal(ShowPhase.Running, s.Evaluate(At(85)).Phase);
+    }
+
+    [Fact]
+    public void Hold_during_the_preroll_rolls_it_again_on_release()
+    {
+        var s = new ShowSchedule { Preroll = TimeSpan.FromSeconds(5) };
+        s.Set(At(60), At(660));
+        s.Hold(At(57)); // 3 s into the preroll
+        var h = s.Evaluate(At(57));
+        Assert.Equal(ShowPhase.Holding, h.Phase);
+        Assert.False(h.Started);
+
+        s.Release(At(58));
+        var p = s.Evaluate(At(58));
+        Assert.Equal(ShowPhase.Preroll, p.Phase);
+        Assert.Equal(At(63), p.EffectiveStart);
+        Assert.Equal(TimeSpan.FromSeconds(-5), p.Elapsed);
+        Assert.Equal(At(663), p.EffectiveEnd);
+    }
+
+    [Fact]
+    public void Hold_released_before_the_preroll_changes_nothing()
+    {
+        var s = new ShowSchedule { Preroll = TimeSpan.FromSeconds(5) };
+        s.Set(At(60), At(660));
+        s.Hold(At(10));
+        s.Release(At(55));
+        var p = s.Evaluate(At(55));
+        Assert.Equal(ShowPhase.Preroll, p.Phase);
+        Assert.Equal(At(60), p.EffectiveStart);
+        Assert.Equal(TimeSpan.Zero, p.Delay);
+    }
+
+    [Fact]
     public void Show_without_an_end_counts_up()
     {
         var s = new ShowSchedule();
@@ -192,6 +262,7 @@ public class ShowControllerTests
     public void Hold_button_delays_the_start_and_keeps_the_length()
     {
         using var r = new Rig();
+        Assert.True(r.Host.Execute("show preroll 0").Ok);
         r.Host.Show.Schedule(r.Wall.AddSeconds(10), r.Wall.AddSeconds(70));
         Assert.True(r.Host.Execute("show hold").Ok);
         r.Advance(30); // 20 s past the start, still held
@@ -217,6 +288,62 @@ public class ShowControllerTests
     }
 
     [Fact]
+    public void Preroll_rolls_the_timecode_up_to_the_start()
+    {
+        using var r = new Rig();
+        var e = r.Host.Engine;
+        e.LtcOffset = LinearTimecode.Timecode.Parse("01:00:00:00", e.Rate);
+        Assert.Equal(TimeSpan.FromSeconds(5), r.Host.Show.Preroll); // the default
+        r.Host.Show.Schedule(r.Wall.AddSeconds(10), r.Wall.AddSeconds(70));
+
+        r.Advance(4);
+        Assert.Equal(TransportState.Stopped, r.Host.Status.State);
+        Assert.False(e.OutputAt(r.Clock.Now).Active);
+
+        r.Advance(1); // 5 s before the start: the code rolls
+        Assert.Equal(ShowPhase.Preroll, r.Host.Show.View.ShowPhase);
+        Assert.Equal("−0:05", r.Host.Show.View.Display);
+        Assert.Contains("Preroll", r.Host.Show.View.Detail);
+        Assert.Equal(TransportState.Running, r.Host.Status.State);
+        var p = e.OutputAt(r.Clock.Now);
+        Assert.True(p.Active && p.Moving);
+        Assert.Equal(LinearTimecode.Timecode.Parse("00:59:55:00", e.Rate).TotalFrames, (long)Math.Round(p.Frames));
+
+        r.Advance(5); // the start: no jump in the code
+        Assert.Equal(ShowPhase.Running, r.Host.Show.State.Phase);
+        Assert.Equal(LinearTimecode.Timecode.Parse("01:00:00:00", e.Rate).TotalFrames, (long)Math.Round(e.OutputAt(r.Clock.Now).Frames));
+        Assert.Equal("1:00", r.Host.Status.Display);
+        r.Advance(15);
+        Assert.Equal("0:45", r.Host.Show.View.Display);
+    }
+
+    [Fact]
+    public void Hold_during_the_preroll_stops_the_code_until_release()
+    {
+        using var r = new Rig();
+        var e = r.Host.Engine;
+        r.Host.Show.Schedule(r.Wall.AddSeconds(10), r.Wall.AddSeconds(70));
+        r.Advance(7); // 2 s into the preroll
+        Assert.Equal(TransportState.Running, r.Host.Status.State);
+
+        Assert.True(r.Host.Execute("show hold").Ok);
+        Assert.Equal(TransportState.Stopped, r.Host.Status.State);
+        Assert.False(e.OutputAt(r.Clock.Now).Active);
+        Assert.Contains("prerolls 0:05 on release", r.Host.Show.View.Detail);
+        r.Advance(20);
+        Assert.Equal(TransportState.Stopped, r.Host.Status.State);
+
+        Assert.True(r.Host.Execute("show release").Ok);
+        Assert.Equal(ShowPhase.Preroll, r.Host.Show.State.Phase);
+        Assert.Equal(TransportState.Running, r.Host.Status.State);
+        Assert.Equal(r.Wall.AddSeconds(5), r.Host.Show.State.EffectiveStart);
+        Assert.Equal(r.Wall.AddSeconds(65), r.Host.Show.State.EffectiveEnd); // the show keeps its length
+        r.Advance(5);
+        Assert.Equal(ShowPhase.Running, r.Host.Show.State.Phase);
+        Assert.Equal("1:00", r.Host.Status.Display);
+    }
+
+    [Fact]
     public void Show_settings_and_commands()
     {
         using var r = new Rig();
@@ -230,6 +357,16 @@ public class ShowControllerTests
         Assert.Equal("none", r.Host.FindSetting("show-start")!.Value);
         Assert.False(r.Host.Execute("show hold").Ok);
         Assert.False(r.Host.Execute("show end 20:00").Ok); // no start yet
+
+        Assert.Equal("00:00:05", r.Host.FindSetting("show-preroll")!.Value);
+        Assert.True(r.Host.Execute("show preroll 10").Ok);
+        Assert.Equal(TimeSpan.FromSeconds(10), r.Host.Show.Preroll);
+        Assert.True(r.Host.Execute("show preroll 12f").Ok); // 25 fps
+        Assert.Equal(TimeSpan.FromSeconds(0.48), r.Host.Show.Preroll);
+        Assert.False(r.Host.Execute("show preroll -5").Ok);
+        Assert.False(r.Host.Execute("show preroll 2h").Ok);
+        Assert.True(r.Host.Execute("show preroll 0").Ok);
+        Assert.Equal(TimeSpan.Zero, r.Host.Show.Preroll);
     }
 
     [Fact]

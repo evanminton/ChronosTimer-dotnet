@@ -40,9 +40,13 @@ public sealed class ShowController : IDisposable
     private Timer? _timer;
     private int _ticking;
 
+    /// <summary>Timecode preroll a new controller starts with.</summary>
+    public static readonly TimeSpan DefaultPreroll = TimeSpan.FromSeconds(5);
+
     public ShowController(TimerHost host)
     {
         _host = host;
+        _schedule.Preroll = DefaultPreroll;
     }
 
     /// <summary>Wall clock for the schedule. Replaceable for tests.</summary>
@@ -107,15 +111,26 @@ public sealed class ShowController : IDisposable
         switch (st.Phase)
         {
             case ShowPhase.Waiting:
-                if (prev is ShowPhase.Idle or ShowPhase.Over || prevStarted) Prepare(st);
+                if (prev is ShowPhase.Idle or ShowPhase.Over or ShowPhase.Preroll || prevStarted) Prepare(st);
+                return true;
+            case ShowPhase.Preroll:
+                // Roll the timecode up to the start: the count sits the rest of the preroll before zero.
+                Prepare(st);
+                Engine.SeekElapsed(st.Elapsed!.Value);
+                Engine.Play();
+                _host.Log("Show preroll: timecode rolling, starts " + ShowTime.Short(st.EffectiveStart!.Value, WallClock()));
                 return true;
             case ShowPhase.Holding when st.Started:
                 Engine.Pause();
                 _host.Log("Show held");
                 return true;
             case ShowPhase.Holding:
-                if (prev is ShowPhase.Idle) Prepare(st);
+                if (prev is ShowPhase.Idle or ShowPhase.Preroll) Prepare(st); // a hold during the preroll stops the code; it rolls again on release
                 _host.Log("Show start held");
+                return true;
+            case ShowPhase.Running when prev == ShowPhase.Preroll:
+                Engine.Play(); // already rolling: no locate, so the code runs on without a jump
+                _host.Log("Show started");
                 return true;
             case ShowPhase.Running:
                 if (!prevStarted && prev != ShowPhase.Holding) Prepare(st);
@@ -165,6 +180,17 @@ public sealed class ShowController : IDisposable
 
     public DateTimeOffset? ScheduledStart { get { lock (_gate) return _schedule.Start; } }
     public DateTimeOffset? ScheduledEnd { get { lock (_gate) return _schedule.End; } }
+
+    /// <summary>How long the timer (and its LTC) runs before the scheduled start, so receivers are locked by the start. Holds delay it too.</summary>
+    public TimeSpan Preroll
+    {
+        get { lock (_gate) return _schedule.Preroll; }
+        set
+        {
+            lock (_gate) _schedule.Preroll = value;
+            Tick();
+        }
+    }
 
     /// <summary>The schedule now.</summary>
     public ShowState State { get { lock (_gate) return _schedule.Evaluate(WallClock()); } }
@@ -313,16 +339,16 @@ public sealed class ShowController : IDisposable
 
         switch (st.Phase)
         {
-            case ShowPhase.Waiting:
+            case ShowPhase.Waiting or ShowPhase.Preroll:
                 display = "−" + Span(st.UntilStart!.Value, up: true);
-                detail = "Starts " + ShowTime.Short(st.EffectiveStart!.Value, now) + Ends() + (st.Length is { } l ? " (" + Span(l) + ")" : "") + Delay();
+                detail = (st.Phase == ShowPhase.Preroll ? "Preroll · starts " : "Starts ") + ShowTime.Short(st.EffectiveStart!.Value, now) + Ends() + (st.Length is { } l ? " (" + Span(l) + ")" : "") + Delay();
                 phase = TimerPhase.Normal;
                 progress = null;
                 remaining = st.UntilStart;
                 break;
             case ShowPhase.Holding when !st.Started:
                 display = "HOLD";
-                detail = "Held " + Span(st.HeldFor) + " · starts on release" + (st.Length is { } hl ? " · runs " + Span(hl) : "");
+                detail = "Held " + Span(st.HeldFor) + (st.Preroll > TimeSpan.Zero ? " · prerolls " + Span(st.Preroll) + " on release" : " · starts on release") + (st.Length is { } hl ? " · runs " + Span(hl) : "");
                 phase = TimerPhase.Warning;
                 progress = null;
                 remaining = null;
@@ -535,6 +561,7 @@ public sealed class ShowController : IDisposable
         if (st.Start is { } s) sb.Append(" · start ").Append(ShowTime.Short(s, WallClock()));
         if (st.End is { } e) sb.Append(" · end ").Append(ShowTime.Short(e, WallClock()));
         if (st.Delay > TimeSpan.Zero) sb.Append(" · delayed ").Append(TimerEngine.Fmt(st.Delay));
+        if (st.Phase != ShowPhase.Idle && st.Preroll > TimeSpan.Zero) sb.Append(" · preroll ").Append(TimerEngine.Fmt(st.Preroll));
         sb.AppendLine();
         sb.AppendLine("cue " + Setting.Token(Cue) + (_master is { } m && m.Followers.Count > 0
             ? " · acknowledged by " + (m.Followers.Any(f => f.Acknowledged) ? string.Join(", ", m.Followers.Where(f => f.Acknowledged).Select(f => f.Name)) : "nobody yet")

@@ -16,7 +16,7 @@ public sealed class ShowPage : ContentPage
     private readonly FlexLayout _cueButtons;
     private readonly Button _ack, _hold;
     private readonly VerticalStackLayout _messages, _scheduleSection;
-    private readonly Entry _messageEntry;
+    private readonly Entry _messageEntry, _preroll;
     private readonly Picker _recipient;
     private readonly DatePicker _startDate, _endDate;
     private readonly TimePicker _startTime, _endTime;
@@ -94,7 +94,7 @@ public sealed class ShowPage : ContentPage
         var pickers = new Grid
         {
             ColumnDefinitions = { new(GridLength.Auto), new(GridLength.Star), new(GridLength.Star) },
-            RowDefinitions = { new(GridLength.Auto), new(GridLength.Auto) },
+            RowDefinitions = { new(GridLength.Auto), new(GridLength.Auto), new(GridLength.Auto) },
             ColumnSpacing = 8,
             RowSpacing = 8,
         };
@@ -104,6 +104,12 @@ public sealed class ShowPage : ContentPage
         pickers.Add(new HorizontalStackLayout { Spacing = 4, Children = { _useEnd, new Label { Text = "End", TextColor = Ui.Text, VerticalOptions = LayoutOptions.Center } } }, 0, 1);
         pickers.Add(_endDate, 1, 1);
         pickers.Add(_endTime, 2, 1);
+        _preroll = Ui.Entry("5");
+        _preroll.Completed += (_, _) => ApplyPreroll();
+        _preroll.Unfocused += (_, _) => ApplyPreroll();
+        pickers.Add(new Label { Text = "Preroll", TextColor = Ui.Text, VerticalOptions = LayoutOptions.Center }, 0, 2);
+        pickers.Add(_preroll, 1, 2);
+        pickers.Add(new Label { Text = "seconds (or frames: 12f)", TextColor = Ui.Muted, FontSize = 13, VerticalOptions = LayoutOptions.Center }, 2, 2);
 
         _hold = Ui.Button("⏸  HOLD START", () => Run("show toggle"));
         _hold.FontAttributes = FontAttributes.Bold;
@@ -118,7 +124,8 @@ public sealed class ShowPage : ContentPage
                 Ui.Card(pickers),
                 Ui.Row(Ui.Button("Schedule show", Schedule, primary: true), Ui.Button("Start now", () => Run("show start now")), Ui.Button("Clear", () => Run("show clear"))),
                 _hold,
-                Ui.Caption("Hold keeps the timer from starting until you release it (late artist). The end time moves by the same amount, so the show keeps its full length. Hold while running pauses the show and moves the end."),
+                Ui.Caption("Preroll starts the timer and its LTC this long before the start, so receivers are locked when the show starts."),
+                Ui.Caption("Hold keeps the timer from starting until you release it (late artist). The preroll waits too and runs in full after the release. The end time moves by the same amount, so the show keeps its full length. Hold while running pauses the show and moves the end."),
                 _scheduleStatus,
             },
         };
@@ -172,8 +179,20 @@ public sealed class ShowPage : ContentPage
         if (Run("message " + (text.StartsWith('@') ? "" : Target()) + text)) _messageEntry.Text = "";
     }
 
+    private bool ApplyPreroll()
+    {
+        string text = (_preroll.Text ?? "").Trim();
+        if (text.Length == 0 || text == PrerollText()) return true;
+        if (!Run("show preroll " + text)) return false;
+        _preroll.Text = PrerollText();
+        return true;
+    }
+
+    private static string PrerollText() => Show.Preroll.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
     private void Schedule()
     {
+        if (!ApplyPreroll()) return;
         var start = (_startDate.Date ?? DateTime.Today).Date + (_startTime.Time ?? TimeSpan.Zero);
         var cmd = "show start " + ShowTime.Format(new DateTimeOffset(start, TimeZoneInfo.Local.GetUtcOffset(start)));
         if (!Run("show clear") || !Run(cmd)) return;
@@ -210,6 +229,7 @@ public sealed class ShowPage : ContentPage
             _endDate.Date = l.Date;
             _endTime.Time = l.TimeOfDay;
         }
+        _preroll.Text = PrerollText();
         _timer ??= Dispatcher.CreateTimer();
         _timer.Interval = TimeSpan.FromMilliseconds(40);
         _timer.Tick -= OnTick;

@@ -437,6 +437,13 @@ public sealed class TimerEngine
         }
     });
 
+    /// <summary>Count modes: sets the elapsed count directly. Negative is before the start (a show's timecode preroll).</summary>
+    public void SeekElapsed(TimeSpan elapsed) => Mutate($"seek {Fmt(elapsed)}", _ =>
+    {
+        _anchorElapsed = elapsed.TotalSeconds;
+        _ended = false;
+    });
+
     /// <summary>Locate from text (see <see cref="TimeInput"/>).</summary>
     public void Locate(string text) => Locate(TimeInput.Parse(text));
 
