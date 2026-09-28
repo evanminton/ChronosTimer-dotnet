@@ -53,7 +53,8 @@ Times can be typed as `HH:MM:SS:FF` (`;` = drop-frame), `H:MM:SS`, `M:SS`, secon
 | **Messages** | `message places please` (everyone) · `message @ChronosTimer02 standby` (one timer). Followers' messages go through the master to everyone. |
 | **Cue light** | `cue standby`, `cue go` (also off, warning, end, stop) on the master; every follower shows it and can `cue ack`. With `cue-auto on` (default) the light turns to warning at the countdown's `warning` time and to end at zero (never over standby or stop). |
 | **Scheduled show** | `show start 19:30` · `show end 21:30` (or the date/time pickers in the app). The timer arms as a countdown of the show's length and starts itself at the start time. Without an end it counts up from the start. |
-| **Hold** | `show hold` / `show release` (the app's HOLD button). Held before the start, the timer waits until released (the artist is late) and the end moves by the delay, so the show keeps its full length. Held while running, the show pauses and the end moves by the length of the hold. |
+| **Timecode preroll** | `show preroll 5` (seconds, the default; `12f` for frames, `0` for none), or the Preroll box in the app. The timer and its LTC start rolling this long before the show start, so receivers are locked when it starts: with `ltc-offset 01:00:00:00` the code runs from 00:59:55:00 and reaches 01:00:00:00 at the start. |
+| **Hold** | `show hold` / `show release` (the app's HOLD button). Held before the start, the timer waits until released (the artist is late) and the end moves by the delay, so the show keeps its full length. The preroll waits too: released after the preroll point (or held during the preroll, which stops the code), the preroll runs in full from the release. Held while running, the show pauses and the end moves by the length of the hold. |
 
 ## chronos-timer (console utility)
 

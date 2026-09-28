@@ -19,7 +19,7 @@ public sealed partial class TimerHost
         var sh = Show;
         const string S = "Show", L = "Link";
 
-        Add(new Setting("show-start", S, SettingKind.Text, "Scheduled show start: the timer arms as a countdown of the show's length and starts itself at this time ('none' = no show). " + ShowTime.Help + ".",
+        Add(new Setting("show-start", S, SettingKind.Text, "Scheduled show start: the timer arms as a countdown of the show's length and starts itself at this time, running show-preroll early ('none' = no show). " + ShowTime.Help + ".",
             () => ShowTime.Format(sh.ScheduledStart), v =>
             {
                 var now = sh.WallClock();
@@ -35,6 +35,13 @@ public sealed partial class TimerHost
                 var end = ShowTime.Parse(v, sh.WallClock(), start);
                 if (end is not null && start is null) throw new FormatException("Set show-start first.");
                 sh.Schedule(start, end);
+            }));
+        Add(new Setting("show-preroll", S, SettingKind.Duration, "Timecode preroll: the timer and its LTC start rolling this long before the show start, so receivers are locked at the start (0 = none; seconds, or frames as 12f). A hold delays it too.",
+            () => TimerEngine.Fmt(sh.Preroll), v =>
+            {
+                var p = ParseSpan(v, Engine.Rate);
+                if (p < TimeSpan.Zero || p > TimeSpan.FromHours(1)) throw new FormatException("The preroll must be 0 to 1 hour.");
+                sh.Preroll = p;
             }));
         Add(new Setting("cue-auto", S, SettingKind.Toggle, "The cue light turns to warning at the countdown's warning time and to end at zero (unless it is on standby or stop).",
             () => Setting.Bool(sh.CueAuto), v => sh.CueAuto = Setting.ParseBool(v)));
@@ -60,8 +67,8 @@ public sealed partial class TimerHost
     {
         var sh = Show;
         var c = Commands;
-        c.Add("show", "show [start <when>|end <when>|hold|release|clear]",
-            "Scheduled show: set the start/end (" + ShowTime.Help + "), hold the start (the end moves with the delay), release it, or clear it. No argument: show status.",
+        c.Add("show", "show [start <when>|end <when>|preroll <time>|hold|release|clear]",
+            "Scheduled show: set the start/end (" + ShowTime.Help + ") or the timecode preroll before the start (5s, 125f), hold the start (the end moves with the delay), release it, or clear it. No argument: show status.",
             (a, raw) =>
             {
                 string sub = a.Length > 0 ? a[0].ToLowerInvariant() : "";
@@ -77,6 +84,9 @@ public sealed partial class TimerHost
                     case "end":
                         Set("show-end", rest);
                         break;
+                    case "preroll" or "pre-roll":
+                        Set("show-preroll", rest);
+                        break;
                     case "hold":
                         sh.SetHold(true);
                         break;
@@ -90,7 +100,7 @@ public sealed partial class TimerHost
                         sh.Schedule(null, null);
                         break;
                     default:
-                        return CommandResult.Error($"Unknown show command '{sub}'. Use: show start <when>, show end <when>, show hold, show release, show clear.");
+                        return CommandResult.Error($"Unknown show command '{sub}'. Use: show start <when>, show end <when>, show preroll <time>, show hold, show release, show clear.");
                 }
                 return Ok(sh.StatusText());
             });

@@ -9,6 +9,8 @@ public enum ShowPhase
     Idle,
     /// <summary>Scheduled; counting down to the start.</summary>
     Waiting,
+    /// <summary>The timecode preroll: the timer is already running (and its LTC rolling) up to the start.</summary>
+    Preroll,
     /// <summary>Held: before the start the start waits for the release; while running the count is paused.</summary>
     Holding,
     /// <summary>Between the (delayed) start and the (delayed) end.</summary>
@@ -39,13 +41,19 @@ public sealed record ShowState
     /// <summary>True once the show has started.</summary>
     public bool Started { get; init; }
 
+    /// <summary>How long the timecode rolls before the start.</summary>
+    public TimeSpan Preroll { get; init; }
+
+    /// <summary>When the timecode starts rolling: <see cref="EffectiveStart"/> − <see cref="Preroll"/>.</summary>
+    public DateTimeOffset? PrerollStart { get; init; }
+
     /// <summary>Time left until the start (before it).</summary>
     public TimeSpan? UntilStart { get; init; }
 
     /// <summary>Time left until the end (after the start, when an end is set; negative when over).</summary>
     public TimeSpan? Remaining { get; init; }
 
-    /// <summary>Running time since the start, holds excluded (after the start).</summary>
+    /// <summary>Running time since the start, holds excluded (after the start; negative during the preroll).</summary>
     public TimeSpan? Elapsed { get; init; }
 
     /// <summary>Scheduled end − start, when an end is set. Holds never shorten it: the end moves instead.</summary>
@@ -56,6 +64,8 @@ public sealed record ShowState
 /// A show's scheduled start and end, and the hold button for a late start ("the artist is late"): hold before the start
 /// and the start waits until the hold is released; the end moves by the same amount, so the show keeps its full length.
 /// A hold while the show runs pauses it and moves the end by the length of the hold.
+/// With a <see cref="Preroll"/> the timecode starts rolling that long before the start. A hold before the start delays
+/// the preroll too: released after the preroll point (or during the preroll), the preroll runs again in full from the release.
 /// Pure logic on wall-clock instants; not thread-safe (the owner locks).
 /// </summary>
 public sealed class ShowSchedule
@@ -66,6 +76,19 @@ public sealed class ShowSchedule
     public DateTimeOffset? Start { get; private set; }
     public DateTimeOffset? End { get; private set; }
     public bool Holding => _heldSince is not null;
+
+    private TimeSpan _preroll;
+
+    /// <summary>How long the timecode rolls before the start (zero = none). Kept when the show is rescheduled.</summary>
+    public TimeSpan Preroll
+    {
+        get => _preroll;
+        set
+        {
+            if (value < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(value), "The preroll can't be negative.");
+            _preroll = value;
+        }
+    }
 
     /// <summary>Schedules a show (end optional: without one the show counts up from the start). Clears holds and delays.</summary>
     public void Set(DateTimeOffset? start, DateTimeOffset? end)
@@ -104,8 +127,10 @@ public sealed class ShowSchedule
         var effStart = Start!.Value + _startDelay;
         if (since < effStart)
         {
-            // Held before the start: only the part past the start delays anything.
-            var d = now > effStart ? now - effStart : TimeSpan.Zero;
+            // Held before the start: only the part past the preroll point delays anything, so a release after it
+            // (a hold during the preroll included) runs the whole preroll again from the release.
+            var roll = effStart - _preroll;
+            var d = now > roll ? now - roll : TimeSpan.Zero;
             return (_startDelay + d, _delay + d);
         }
         return (_startDelay, _delay + (now > since ? now - since : TimeSpan.Zero));
@@ -119,9 +144,12 @@ public sealed class ShowSchedule
         bool preStartHold = _heldSince is { } hs && hs < start + _startDelay;
         var effStart = start + sd;
         var effEnd = End + d;
+        var rollStart = effStart - _preroll;
         bool started = !preStartHold && now >= effStart;
+        bool rolling = !preStartHold && !started && now >= rollStart;
 
         var phase = _heldSince is not null ? ShowPhase.Holding
+            : rolling ? ShowPhase.Preroll
             : !started ? ShowPhase.Waiting
             : effEnd is { } ee && now >= ee ? ShowPhase.Over
             : ShowPhase.Running;
@@ -136,9 +164,11 @@ public sealed class ShowSchedule
             Delay = d,
             HeldFor = _heldSince is { } h ? now - h : TimeSpan.Zero,
             Started = started,
+            Preroll = _preroll,
+            PrerollStart = rollStart,
             UntilStart = started ? null : effStart - now,
             Remaining = started && effEnd is { } re ? re - now : null,
-            Elapsed = started ? now - effStart - (d - sd) : null,
+            Elapsed = started ? now - effStart - (d - sd) : rolling ? now - effStart : null,
             Length = End - start,
         };
     }
