@@ -5,6 +5,7 @@ using System.Text;
 using ChronosTimer.Audio;
 using ChronosTimer.Control;
 using ChronosTimer.Settings;
+using ChronosTimer.Show;
 using LinearTimecode;
 using LinearTimecode.BinaryGroups;
 
@@ -15,7 +16,7 @@ namespace ChronosTimer;
 /// WebSocket and OSC control servers, the settings catalog, the text commands and settings persistence.
 /// The console utility and the MAUI app are thin shells around this class.
 /// </summary>
-public sealed class TimerHost : IDisposable
+public sealed partial class TimerHost : IDisposable
 {
     private readonly object _audioGate = new();
     private readonly List<string> _log = [];
@@ -54,8 +55,11 @@ public sealed class TimerHost : IDisposable
         Audio = audio ?? NullAudioBackend.Instance;
         Engine = engine ?? new TimerEngine();
         Commands = new CommandSet();
+        Show = new ShowController(this);
         BuildSettings();
+        BuildShowSettings();
         BuildCommands();
+        BuildShowCommands();
         Engine.Changed += what => { if (what.StartsWith("mode", StringComparison.Ordinal)) UpdateClockChoice(); StatusChanged?.Invoke(); };
         Engine.Ended += a => Log($"End reached → {Setting.Token(a)}");
     }
@@ -125,10 +129,12 @@ public sealed class TimerHost : IDisposable
         ApplyInput();
         ApplyHttp();
         ApplyOsc();
+        Show.Start();
     }
 
     public void Dispose()
     {
+        Show.Dispose();
         CloseOutput();
         CloseInput();
         _http?.Dispose(); _http = null;

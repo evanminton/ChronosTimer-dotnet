@@ -33,7 +33,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Chronos Timer reads LTC timecode from the audio input to chase it.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Chronos Timer accepts remote control (browser remote, HTTP, OSC) from devices on your network.</string>
+	<string>Chronos Timer accepts remote control (browser remote, HTTP, OSC) and links with other Chronos Timers on your network.</string>
 	<key>XSAppIconAssets</key>
 	<string>Assets.xcassets/appicon.appiconset</string>
 </dict>
