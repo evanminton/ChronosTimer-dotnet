@@ -15,6 +15,7 @@ public class App : Application
     {
         var tabs = new TabbedPage { Title = "Chronos Timer", BarBackgroundColor = Ui.Panel, UnselectedTabColor = Ui.Muted, SelectedTabColor = Ui.Accent };
         tabs.Children.Add(new NavigationPage(new TimerPage()) { Title = "Timer", BarBackgroundColor = Ui.Background, BarTextColor = Ui.Text });
+        tabs.Children.Add(new NavigationPage(new ShowPage()) { Title = "Show", BarBackgroundColor = Ui.Background, BarTextColor = Ui.Text });
         tabs.Children.Add(new NavigationPage(new SettingsPage()) { Title = "Settings", BarBackgroundColor = Ui.Background, BarTextColor = Ui.Text });
         tabs.Children.Add(new NavigationPage(new ControlPage()) { Title = "Control", BarBackgroundColor = Ui.Background, BarTextColor = Ui.Text });
         var window = new Window(tabs) { Title = "Chronos Timer", Width = 1000, Height = 760 };
