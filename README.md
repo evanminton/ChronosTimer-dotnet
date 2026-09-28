@@ -44,6 +44,17 @@ Every command and setting has a human-readable name, description and list of all
 
 Times can be typed as `HH:MM:SS:FF` (`;` = drop-frame), `H:MM:SS`, `M:SS`, seconds (`90`), or units (`1h30m`, `45s`, `12f`); `+`/`-` makes them relative.
 
+## Show: linked timers, cue light, scheduled start and hold
+
+| Feature | How |
+|---|---|
+| **Linked timers** | `link-role master` on one timer, `link-role follower` on the others. Followers find the master on their own (`link-master auto`, UDP beacon on 8491) or by address (`link-master 169.254.10.20`). The link is TCP 8490 and uses the link-local **169.254.x.x (APIPA)** network by default (`link-bind apipa`; falls back to every network when the computer has no APIPA address). Each timer is a node named **ChronosTimer##**: the master is ChronosTimer01, followers get the next free number and ask for the same one on reconnect (`link-name` for a custom name). Optional shared `link-key`. |
+| **Master time** | Followers' Show tab shows the master's running time, show line and cue light. |
+| **Messages** | `message places please` (everyone) · `message @ChronosTimer02 standby` (one timer). Followers' messages go through the master to everyone. |
+| **Cue light** | `cue standby`, `cue go` (also off, warning, end, stop) on the master; every follower shows it and can `cue ack`. With `cue-auto on` (default) the light turns to warning at the countdown's `warning` time and to end at zero (never over standby or stop). |
+| **Scheduled show** | `show start 19:30` · `show end 21:30` (or the date/time pickers in the app). The timer arms as a countdown of the show's length and starts itself at the start time. Without an end it counts up from the start. |
+| **Hold** | `show hold` / `show release` (the app's HOLD button). Held before the start, the timer waits until released (the artist is late) and the end moves by the delay, so the show keeps its full length. Held while running, the show pauses and the end moves by the length of the hold. |
+
 ## chronos-timer (console utility)
 
 ```
@@ -63,6 +74,7 @@ chronos-timer settings | commands | devices | help
 
 * **Timer**: big auto-sizing display colored by phase, progress bar, play/pause, stop, reset, restart, ±frame/second, ±minute, jam, reverse, mode buttons, locate and duration entry, LTC out/in switches, signal and remote status.
 * **Settings**: every setting from the catalog, grouped, with its description, default and allowed values; saved automatically.
+* **Show**: the master's running time, the cue light (with acknowledge on followers), messages, the show schedule with date/time pickers and the HOLD button, and the link role.
 * **Control**: browser-remote/HTTP/OSC addresses, a command line, the full command reference and the log.
 
 Android uses AudioTrack/AudioRecord; iOS and Mac use Audio Queues (system default device), Windows uses WinMM (any device). The app keeps the screen on while the timer page is open; on iOS it keeps running in the background (audio background mode).
